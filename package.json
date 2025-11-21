@@ -1,0 +1,12 @@
+{
+  "name": "root-workspace",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev --prefix user-profile-crud",
+    "start": "npm run start --prefix user-profile-crud",
+    "install:api": "npm install --prefix user-profile-crud"
+  },
+  "dependencies": {
+    "mongodb": "^7.0.0"
+  }
+}
