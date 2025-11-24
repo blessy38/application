@@ -5,6 +5,10 @@ import morgan from "morgan";
 import path from "path";
 import { fileURLToPath } from "url";
 import userRoutes from "./routes/userRoutes.js";
+import serviceRoutes from "./routes/serviceRoutes.js";
+import workshopRoutes from "./routes/workshopRoutes.js";
+import productRoutes from "./routes/productRoutes.js";
+import aboutRoutes from "./routes/aboutRoutes.js";
 import { connectDB } from "./config/database.js";
 import { ensureUserIndexes } from "./models/User.js";
 
@@ -23,6 +27,10 @@ app.use(express.urlencoded({ extended: true }));
 app.use("/uploads", express.static(uploadsPath));
 
 app.use("/api/users", userRoutes);
+app.use("/api/services", serviceRoutes);
+app.use("/api/workshops", workshopRoutes);
+app.use("/api/products", productRoutes);
+app.use("/api/about", aboutRoutes);
 
 app.get("/", (req, res) => {
   res.json({ message: "User profile API running" });
