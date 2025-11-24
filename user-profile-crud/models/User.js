@@ -1,23 +1,14 @@
-import { ObjectId } from "mongodb";
-import { getDB } from "../config/database.js";
+import mongoose from "mongoose";
 
-export const USERS_COLLECTION = "users";
 export const DEFAULT_PROFILE_PHOTO = "/uploads/default-avatar.png";
 
 const TRUVEDA_PATTERN = /^[a-zA-Z0-9_]+$/;
-const EMAIL_PATTERN =
-  /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/;
+const EMAIL_PATTERN = /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/;
 const MAX_FIRST_NAME = 50;
 const MAX_LAST_NAME = 50;
 const MAX_DISPLAY_NAME = 100;
 const MAX_INTRO = 200;
 const MAX_ABOUT = 2000;
-const DEFAULT_SOCIAL_LINKS = {
-  instagramLink: "",
-  facebookLink: "",
-  youtubeLink: "",
-  linkedinLink: "",
-};
 
 export class ValidationError extends Error {
   constructor(message) {
@@ -26,196 +17,143 @@ export class ValidationError extends Error {
   }
 }
 
-const toObjectId = (id) => {
-  const value =
-    typeof id === "string" ? id.trim() : id?.toString()?.trim() ?? "";
-  if (!value || !ObjectId.isValid(value)) {
-    throw new ValidationError("Invalid user id");
+const socialLinksSchema = new mongoose.Schema(
+  {
+    instagramLink: { type: String, default: "", trim: true },
+    facebookLink: { type: String, default: "", trim: true },
+    youtubeLink: { type: String, default: "", trim: true },
+    linkedinLink: { type: String, default: "", trim: true },
+  },
+  { _id: false }
+);
+
+const userSchema = new mongoose.Schema(
+  {
+    profilePhoto: {
+      type: String,
+      default: DEFAULT_PROFILE_PHOTO,
+      trim: true,
+    },
+    truvedaLink: {
+      type: String,
+      required: [true, "truvedaLink is required"],
+      unique: true,
+      trim: true,
+      lowercase: true,
+      validate: {
+        validator: function (v) {
+          return TRUVEDA_PATTERN.test(v);
+        },
+        message: "truvedaLink may only contain letters, numbers, underscores",
+      },
+    },
+    firstName: {
+      type: String,
+      required: [true, "firstName is required"],
+      trim: true,
+      maxlength: [MAX_FIRST_NAME, `firstName must be at most ${MAX_FIRST_NAME} characters`],
+    },
+    lastName: {
+      type: String,
+      required: [true, "lastName is required"],
+      trim: true,
+      maxlength: [MAX_LAST_NAME, `lastName must be at most ${MAX_LAST_NAME} characters`],
+    },
+    displayName: {
+      type: String,
+      required: [true, "displayName is required"],
+      trim: true,
+      maxlength: [MAX_DISPLAY_NAME, `displayName must be at most ${MAX_DISPLAY_NAME} characters`],
+    },
+    intro: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: [MAX_INTRO, `intro must be at most ${MAX_INTRO} characters`],
+    },
+    aboutYourself: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: [MAX_ABOUT, `aboutYourself must be at most ${MAX_ABOUT} characters`],
+    },
+    email: {
+      type: String,
+      required: [true, "email is required"],
+      unique: true,
+      trim: true,
+      lowercase: true,
+      validate: {
+        validator: function (v) {
+          return EMAIL_PATTERN.test(v);
+        },
+        message: "Please provide a valid email",
+      },
+    },
+    socialLinks: {
+      type: socialLinksSchema,
+      default: () => ({
+        instagramLink: "",
+        facebookLink: "",
+        youtubeLink: "",
+        linkedinLink: "",
+      }),
+    },
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
+  },
+  {
+    timestamps: true,
   }
-  return new ObjectId(value);
-};
+);
 
-const coerceBoolean = (value, defaultValue = true) => {
-  if (value === undefined) return defaultValue;
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    const normalized = value.toLowerCase();
-    if (["true", "1", "yes"].includes(normalized)) return true;
-    if (["false", "0", "no"].includes(normalized)) return false;
+// Virtual for fullName
+userSchema.virtual("fullName").get(function () {
+  const firstName = this.firstName ?? "";
+  const lastName = this.lastName ?? "";
+  return [firstName, lastName].filter(Boolean).join(" ").trim();
+});
+
+// Ensure virtuals are included in JSON
+userSchema.set("toJSON", { virtuals: true });
+userSchema.set("toObject", { virtuals: true });
+
+// Indexes
+userSchema.index({ email: 1 }, { unique: true });
+userSchema.index({ truvedaLink: 1 }, { unique: true });
+
+const User = mongoose.model("User", userSchema);
+
+// Helper function to handle Mongoose validation errors
+const handleValidationError = (error) => {
+  if (error.name === "ValidationError") {
+    const messages = Object.values(error.errors).map((err) => err.message);
+    throw new ValidationError(messages.join(", "));
   }
-  throw new ValidationError("isActive must be a boolean value");
-};
-
-const sanitizeString = (value, { trim = true, lowercase = false } = {}) => {
-  if (value === undefined || value === null) return undefined;
-  let result = typeof value === "string" ? value : String(value);
-  if (trim) result = result.trim();
-  if (!result.length) return "";
-  if (lowercase) result = result.toLowerCase();
-  return result;
-};
-
-const validateLength = (value, max, field, errors) => {
-  if (value && value.length > max) {
-    errors.push(`${field} must be at most ${max} characters`);
+  if (error.code === 11000) {
+    const field = Object.keys(error.keyPattern)[0];
+    throw new ValidationError(`${field} already exists`);
   }
-};
-
-const validatePattern = (value, pattern, message, errors) => {
-  if (value && !pattern.test(value)) {
-    errors.push(message);
-  }
-};
-
-const buildSocialLinks = (input = {}, { partial = false } = {}) => {
-  if (!input && partial) {
-    return undefined;
-  }
-
-  const links = partial ? {} : { ...DEFAULT_SOCIAL_LINKS };
-  Object.keys(DEFAULT_SOCIAL_LINKS).forEach((key) => {
-    if (input[key] === undefined) {
-      if (!partial) {
-        links[key] = DEFAULT_SOCIAL_LINKS[key];
-      }
-      return;
-    }
-    links[key] = sanitizeString(input[key]) ?? DEFAULT_SOCIAL_LINKS[key];
-  });
-  return Object.keys(links).length ? links : undefined;
-};
-
-const applyVirtuals = (doc) => {
-  if (!doc) return null;
-  const firstName = doc.firstName ?? "";
-  const lastName = doc.lastName ?? "";
-  return {
-    ...doc,
-    fullName: [firstName, lastName].filter(Boolean).join(" ").trim(),
-  };
-};
-
-const prepareUserDoc = (payload, { partial = false } = {}) => {
-  const errors = [];
-  const doc = {};
-
-  const assignStringField = (field, options) => {
-    const value = sanitizeString(payload[field], options);
-    if (!value && !partial) {
-      if (options.required) {
-        errors.push(`${field} is required`);
-      } else if (options.default !== undefined) {
-        doc[field] =
-          typeof options.default === "function"
-            ? options.default()
-            : options.default;
-      }
-      return;
-    }
-
-    if (value) {
-      if (options.maxLength) {
-        validateLength(value, options.maxLength, field, errors);
-      }
-      if (options.pattern) {
-        validatePattern(value, options.pattern, options.patternMessage, errors);
-      }
-      doc[field] = value;
-    } else if (options.default !== undefined && !partial) {
-      doc[field] =
-        typeof options.default === "function"
-          ? options.default()
-          : options.default;
-    } else if (!value && options.required && !partial) {
-      errors.push(`${field} is required`);
-    }
-  };
-
-  assignStringField("profilePhoto", {
-    default: DEFAULT_PROFILE_PHOTO,
-    trim: true,
-  });
-  assignStringField("truvedaLink", {
-    required: true,
-    trim: true,
-    lowercase: true,
-    pattern: TRUVEDA_PATTERN,
-    patternMessage: "truvedaLink may only contain letters, numbers, underscores",
-  });
-  assignStringField("firstName", {
-    required: true,
-    trim: true,
-    maxLength: MAX_FIRST_NAME,
-  });
-  assignStringField("lastName", {
-    required: true,
-    trim: true,
-    maxLength: MAX_LAST_NAME,
-  });
-  assignStringField("displayName", {
-    required: true,
-    trim: true,
-    maxLength: MAX_DISPLAY_NAME,
-  });
-  assignStringField("intro", {
-    trim: true,
-    maxLength: MAX_INTRO,
-    default: "",
-  });
-  assignStringField("aboutYourself", {
-    trim: true,
-    maxLength: MAX_ABOUT,
-    default: "",
-  });
-  assignStringField("email", {
-    required: true,
-    trim: true,
-    lowercase: true,
-    pattern: EMAIL_PATTERN,
-    patternMessage: "Please provide a valid email",
-  });
-
-  const socialLinks = buildSocialLinks(payload.socialLinks, { partial });
-  if (socialLinks) {
-    doc.socialLinks = socialLinks;
-  } else if (!partial) {
-    doc.socialLinks = { ...DEFAULT_SOCIAL_LINKS };
-  }
-
-  if (payload.isActive !== undefined || !partial) {
-    doc.isActive = coerceBoolean(payload.isActive, true);
-  }
-
-  if (errors.length) {
-    throw new ValidationError(errors.join(", "));
-  }
-
-  return doc;
+  throw error;
 };
 
 export const ensureUserIndexes = async () => {
-  const db = getDB();
-  await db.collection(USERS_COLLECTION).createIndexes([
-    { key: { email: 1 }, unique: true, name: "unique_email" },
-    { key: { truvedaLink: 1 }, unique: true, name: "unique_truvedaLink" },
-  ]);
+  await User.createIndexes();
 };
 
 export const createUser = async (data) => {
-  const db = getDB();
-  const now = new Date();
-  const doc = {
-    ...prepareUserDoc(data),
-    createdAt: now,
-    updatedAt: now,
-  };
-
-  const result = await db.collection(USERS_COLLECTION).insertOne(doc);
-  return applyVirtuals({ ...doc, _id: result.insertedId });
+  try {
+    const user = new User(data);
+    await user.save();
+    return user.toObject();
+  } catch (error) {
+    handleValidationError(error);
+  }
 };
 
 export const listUsers = async ({ page = 1, limit = 10, search = "" } = {}) => {
-  const db = getDB();
   const pageNumber = Math.max(parseInt(page, 10) || 1, 1);
   const limitNumber = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
   const skip = (pageNumber - 1) * limitNumber;
@@ -232,19 +170,17 @@ export const listUsers = async ({ page = 1, limit = 10, search = "" } = {}) => {
     ];
   }
 
-  const collection = db.collection(USERS_COLLECTION);
   const [records, total] = await Promise.all([
-    collection
-      .find(query)
+    User.find(query)
       .skip(skip)
       .limit(limitNumber)
       .sort({ createdAt: -1 })
-      .toArray(),
-    collection.countDocuments(query),
+      .lean({ virtuals: true }),
+    User.countDocuments(query),
   ]);
 
   return {
-    data: records.map(applyVirtuals),
+    data: records,
     total,
     totalPages: total ? Math.ceil(total / limitNumber) : 0,
     page: pageNumber,
@@ -253,60 +189,75 @@ export const listUsers = async ({ page = 1, limit = 10, search = "" } = {}) => {
 };
 
 export const findUserById = async (id) => {
-  const db = getDB();
-  const user = await db
-    .collection(USERS_COLLECTION)
-    .findOne({ _id: toObjectId(id) });
-  return applyVirtuals(user);
+  try {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      throw new ValidationError("Invalid user id");
+    }
+    const user = await User.findById(id).lean({ virtuals: true });
+    return user;
+  } catch (error) {
+    if (error instanceof ValidationError) throw error;
+    throw new ValidationError("Invalid user id");
+  }
 };
 
 export const findUserByEmail = async (email) => {
-  const normalized = sanitizeString(email, { trim: true, lowercase: true });
+  if (!email || typeof email !== "string") return null;
+  const normalized = email.trim().toLowerCase();
   if (!normalized) return null;
-  const db = getDB();
-  const user = await db
-    .collection(USERS_COLLECTION)
-    .findOne({ email: normalized });
-  return applyVirtuals(user);
+  const user = await User.findOne({ email: normalized }).lean({ virtuals: true });
+  return user;
 };
 
 export const findUserByTruvedaLink = async (link) => {
-  const normalized = sanitizeString(link, { trim: true, lowercase: true });
+  if (!link || typeof link !== "string") return null;
+  const normalized = link.trim().toLowerCase();
   if (!normalized) return null;
-  const db = getDB();
-  const user = await db
-    .collection(USERS_COLLECTION)
-    .findOne({ truvedaLink: normalized });
-  return applyVirtuals(user);
+  const user = await User.findOne({ truvedaLink: normalized }).lean({ virtuals: true });
+  return user;
 };
 
 export const updateUser = async (id, data) => {
-  const db = getDB();
-  const updates = prepareUserDoc(data, { partial: true });
+  try {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      throw new ValidationError("Invalid user id");
+    }
 
-  if (!Object.keys(updates).length) {
-    throw new ValidationError("At least one field must be provided to update");
+    if (!data || !Object.keys(data).length) {
+      throw new ValidationError("At least one field must be provided to update");
+    }
+
+    const user = await User.findByIdAndUpdate(
+      id,
+      { $set: data },
+      { new: true, runValidators: true }
+    ).lean({ virtuals: true });
+
+    if (!user) {
+      throw new ValidationError("User not found");
+    }
+
+    return user;
+  } catch (error) {
+    handleValidationError(error);
   }
-
-  updates.updatedAt = new Date();
-
-  const result = await db.collection(USERS_COLLECTION).findOneAndUpdate(
-    { _id: toObjectId(id) },
-    { $set: updates },
-    { returnDocument: "after" }
-  );
-
-  return applyVirtuals(result);
 };
 
 export const deleteUser = async (id) => {
-  const db = getDB();
-  const objectId = toObjectId(id);
-  const result = await db.collection(USERS_COLLECTION).findOneAndDelete({ _id: objectId });
-  if (!result) {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      throw new ValidationError("Invalid user id");
+    }
+
+    const user = await User.findByIdAndDelete(id).lean({ virtuals: true });
+    if (!user) {
+      throw new ValidationError("User not found");
+    }
+    return user;
+  } catch (error) {
+    if (error instanceof ValidationError) throw error;
     throw new ValidationError("User not found");
   }
-  return applyVirtuals(result);
 };
 
-
+export default User;

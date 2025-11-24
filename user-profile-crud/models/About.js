@@ -1,7 +1,4 @@
-import { ObjectId } from "mongodb";
-import { getDB } from "../config/database.js";
-
-export const ABOUT_COLLECTION = "about";
+import mongoose from "mongoose";
 
 const MAX_DESCRIPTION = 5000; // Approx 1000 words
 const MAX_IMAGES = 4;
@@ -13,116 +10,67 @@ export class ValidationError extends Error {
     }
 }
 
-const toObjectId = (id) => {
-    const value =
-        typeof id === "string" ? id.trim() : id?.toString()?.trim() ?? "";
-    if (!value || !ObjectId.isValid(value)) {
-        throw new ValidationError("Invalid about id");
+const aboutSchema = new mongoose.Schema(
+    {
+        description: {
+            type: String,
+            required: [true, "description is required"],
+            trim: true,
+            maxlength: [MAX_DESCRIPTION, `description must be at most ${MAX_DESCRIPTION} characters`],
+        },
+        images: {
+            type: [String],
+            default: [],
+            validate: {
+                validator: function (v) {
+                    return v.length <= MAX_IMAGES;
+                },
+                message: `You can upload up to ${MAX_IMAGES} images`,
+            },
+        },
+    },
+    {
+        timestamps: true,
     }
-    return new ObjectId(value);
-};
+);
 
-const sanitizeString = (value, { trim = true } = {}) => {
-    if (value === undefined || value === null) return undefined;
-    let result = typeof value === "string" ? value : String(value);
-    if (trim) result = result.trim();
-    if (!result.length) return "";
-    return result;
-};
+const About = mongoose.model("About", aboutSchema);
 
-const validateLength = (value, max, field, errors) => {
-    if (value && value.length > max) {
-        errors.push(`${field} must be at most ${max} characters`);
+// Helper function to handle Mongoose validation errors
+const handleValidationError = (error) => {
+    if (error.name === "ValidationError") {
+        const messages = Object.values(error.errors).map((err) => err.message);
+        throw new ValidationError(messages.join(", "));
     }
-};
-
-const prepareAboutDoc = (payload, { partial = false } = {}) => {
-    const errors = [];
-    const doc = {};
-
-    const assignStringField = (field, options) => {
-        const value = sanitizeString(payload[field], options);
-        if (!value && !partial) {
-            if (options.required) {
-                errors.push(`${field} is required`);
-            } else if (options.default !== undefined) {
-                doc[field] =
-                    typeof options.default === "function"
-                        ? options.default()
-                        : options.default;
-            }
-            return;
-        }
-
-        if (value) {
-            if (options.maxLength) {
-                validateLength(value, options.maxLength, field, errors);
-            }
-            doc[field] = value;
-        } else if (options.default !== undefined && !partial) {
-            doc[field] =
-                typeof options.default === "function"
-                    ? options.default()
-                    : options.default;
-        } else if (!value && options.required && !partial) {
-            errors.push(`${field} is required`);
-        }
-    };
-
-    assignStringField("description", {
-        required: true,
-        trim: true,
-        maxLength: MAX_DESCRIPTION,
-    });
-
-    // Images are handled separately in the controller, but we validate the array here if passed
-    if (payload.images) {
-        if (!Array.isArray(payload.images)) {
-            errors.push("images must be an array");
-        } else if (payload.images.length > MAX_IMAGES) {
-            errors.push(`You can upload up to ${MAX_IMAGES} images`);
-        } else {
-            doc.images = payload.images;
-        }
-    } else if (!partial) {
-        doc.images = [];
+    if (error.code === 11000) {
+        const field = Object.keys(error.keyPattern)[0];
+        throw new ValidationError(`${field} already exists`);
     }
-
-    if (errors.length) {
-        throw new ValidationError(errors.join(", "));
-    }
-
-    return doc;
+    throw error;
 };
 
 export const createAbout = async (data) => {
-    const db = getDB();
-    const now = new Date();
-    const doc = {
-        ...prepareAboutDoc(data),
-        createdAt: now,
-        updatedAt: now,
-    };
-
-    const result = await db.collection(ABOUT_COLLECTION).insertOne(doc);
-    return { ...doc, _id: result.insertedId };
+    try {
+        const about = new About(data);
+        await about.save();
+        return about.toObject();
+    } catch (error) {
+        handleValidationError(error);
+    }
 };
 
 export const listAbouts = async ({ page = 1, limit = 10 } = {}) => {
-    const db = getDB();
     const pageNumber = Math.max(parseInt(page, 10) || 1, 1);
     const limitNumber = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
     const skip = (pageNumber - 1) * limitNumber;
 
-    const collection = db.collection(ABOUT_COLLECTION);
     const [records, total] = await Promise.all([
-        collection
-            .find({})
+        About.find({})
             .skip(skip)
             .limit(limitNumber)
             .sort({ createdAt: -1 })
-            .toArray(),
-        collection.countDocuments({}),
+            .lean(),
+        About.countDocuments({}),
     ]);
 
     return {
@@ -135,37 +83,59 @@ export const listAbouts = async ({ page = 1, limit = 10 } = {}) => {
 };
 
 export const findAboutById = async (id) => {
-    const db = getDB();
-    return await db
-        .collection(ABOUT_COLLECTION)
-        .findOne({ _id: toObjectId(id) });
+    try {
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            throw new ValidationError("Invalid about id");
+        }
+        const about = await About.findById(id).lean();
+        return about;
+    } catch (error) {
+        if (error instanceof ValidationError) throw error;
+        throw new ValidationError("Invalid about id");
+    }
 };
 
 export const updateAbout = async (id, data) => {
-    const db = getDB();
-    const updates = prepareAboutDoc(data, { partial: true });
+    try {
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            throw new ValidationError("Invalid about id");
+        }
 
-    if (!Object.keys(updates).length) {
-        throw new ValidationError("At least one field must be provided to update");
+        if (!data || !Object.keys(data).length) {
+            throw new ValidationError("At least one field must be provided to update");
+        }
+
+        const about = await About.findByIdAndUpdate(
+            id,
+            { $set: data },
+            { new: true, runValidators: true }
+        ).lean();
+
+        if (!about) {
+            throw new ValidationError("About entry not found");
+        }
+
+        return about;
+    } catch (error) {
+        handleValidationError(error);
     }
-
-    updates.updatedAt = new Date();
-
-    const result = await db.collection(ABOUT_COLLECTION).findOneAndUpdate(
-        { _id: toObjectId(id) },
-        { $set: updates },
-        { returnDocument: "after" }
-    );
-
-    return result;
 };
 
 export const deleteAbout = async (id) => {
-    const db = getDB();
-    const objectId = toObjectId(id);
-    const result = await db.collection(ABOUT_COLLECTION).findOneAndDelete({ _id: objectId });
-    if (!result) {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            throw new ValidationError("Invalid about id");
+        }
+
+        const about = await About.findByIdAndDelete(id).lean();
+        if (!about) {
+            throw new ValidationError("About entry not found");
+        }
+        return about;
+    } catch (error) {
+        if (error instanceof ValidationError) throw error;
         throw new ValidationError("About entry not found");
     }
-    return result;
 };
+
+export default About;

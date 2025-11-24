@@ -1,7 +1,5 @@
-import { ObjectId } from "mongodb";
-import { getDB } from "../config/database.js";
+import mongoose from "mongoose";
 
-export const WORKSHOPS_COLLECTION = "workshops";
 export const DEFAULT_WORKSHOP_PHOTO = "/uploads/default-workshop.png";
 
 const MAX_WORKSHOP_NAME = 100;
@@ -15,112 +13,73 @@ export class ValidationError extends Error {
     }
 }
 
-const toObjectId = (id) => {
-    const value =
-        typeof id === "string" ? id.trim() : id?.toString()?.trim() ?? "";
-    if (!value || !ObjectId.isValid(value)) {
-        throw new ValidationError("Invalid workshop id");
+const workshopSchema = new mongoose.Schema(
+    {
+        workshopPhoto: {
+            type: String,
+            default: DEFAULT_WORKSHOP_PHOTO,
+            trim: true,
+        },
+        workshopName: {
+            type: String,
+            required: [true, "workshopName is required"],
+            trim: true,
+            maxlength: [MAX_WORKSHOP_NAME, `workshopName must be at most ${MAX_WORKSHOP_NAME} characters`],
+        },
+        shortDescription: {
+            type: String,
+            required: [true, "shortDescription is required"],
+            trim: true,
+            maxlength: [MAX_SHORT_DESC, `shortDescription must be at most ${MAX_SHORT_DESC} characters`],
+        },
+        content: {
+            type: String,
+            required: [true, "content is required"],
+            trim: true,
+            maxlength: [MAX_CONTENT, `content must be at most ${MAX_CONTENT} characters`],
+        },
+        price: {
+            type: String,
+            required: [true, "price is required"],
+            trim: true,
+        },
+        strikerPrice: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+    },
+    {
+        timestamps: true,
     }
-    return new ObjectId(value);
-};
+);
 
-const sanitizeString = (value, { trim = true } = {}) => {
-    if (value === undefined || value === null) return undefined;
-    let result = typeof value === "string" ? value : String(value);
-    if (trim) result = result.trim();
-    if (!result.length) return "";
-    return result;
-};
+const Workshop = mongoose.model("Workshop", workshopSchema);
 
-const validateLength = (value, max, field, errors) => {
-    if (value && value.length > max) {
-        errors.push(`${field} must be at most ${max} characters`);
+// Helper function to handle Mongoose validation errors
+const handleValidationError = (error) => {
+    if (error.name === "ValidationError") {
+        const messages = Object.values(error.errors).map((err) => err.message);
+        throw new ValidationError(messages.join(", "));
     }
-};
-
-const prepareWorkshopDoc = (payload, { partial = false } = {}) => {
-    const errors = [];
-    const doc = {};
-
-    const assignStringField = (field, options) => {
-        const value = sanitizeString(payload[field], options);
-        if (!value && !partial) {
-            if (options.required) {
-                errors.push(`${field} is required`);
-            } else if (options.default !== undefined) {
-                doc[field] =
-                    typeof options.default === "function"
-                        ? options.default()
-                        : options.default;
-            }
-            return;
-        }
-
-        if (value) {
-            if (options.maxLength) {
-                validateLength(value, options.maxLength, field, errors);
-            }
-            doc[field] = value;
-        } else if (options.default !== undefined && !partial) {
-            doc[field] =
-                typeof options.default === "function"
-                    ? options.default()
-                    : options.default;
-        } else if (!value && options.required && !partial) {
-            errors.push(`${field} is required`);
-        }
-    };
-
-    assignStringField("workshopPhoto", {
-        default: DEFAULT_WORKSHOP_PHOTO,
-        trim: true,
-    });
-    assignStringField("workshopName", {
-        required: true,
-        trim: true,
-        maxLength: MAX_WORKSHOP_NAME,
-    });
-    assignStringField("shortDescription", {
-        required: true,
-        trim: true,
-        maxLength: MAX_SHORT_DESC,
-    });
-    assignStringField("content", {
-        required: true,
-        trim: true,
-        maxLength: MAX_CONTENT,
-    });
-    assignStringField("price", {
-        required: true,
-        trim: true,
-    });
-    assignStringField("strikerPrice", {
-        trim: true,
-        default: "",
-    });
-
-    if (errors.length) {
-        throw new ValidationError(errors.join(", "));
+    if (error.code === 11000) {
+        const field = Object.keys(error.keyPattern)[0];
+        throw new ValidationError(`${field} already exists`);
     }
-
-    return doc;
+    throw error;
 };
 
 export const createWorkshop = async (data) => {
-    const db = getDB();
-    const now = new Date();
-    const doc = {
-        ...prepareWorkshopDoc(data),
-        createdAt: now,
-        updatedAt: now,
-    };
-
-    const result = await db.collection(WORKSHOPS_COLLECTION).insertOne(doc);
-    return { ...doc, _id: result.insertedId };
+    try {
+        const workshop = new Workshop(data);
+        await workshop.save();
+        return workshop.toObject();
+    } catch (error) {
+        handleValidationError(error);
+    }
 };
 
 export const listWorkshops = async ({ page = 1, limit = 10, search = "" } = {}) => {
-    const db = getDB();
     const pageNumber = Math.max(parseInt(page, 10) || 1, 1);
     const limitNumber = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
     const skip = (pageNumber - 1) * limitNumber;
@@ -134,15 +93,13 @@ export const listWorkshops = async ({ page = 1, limit = 10, search = "" } = {}) 
         ];
     }
 
-    const collection = db.collection(WORKSHOPS_COLLECTION);
     const [records, total] = await Promise.all([
-        collection
-            .find(query)
+        Workshop.find(query)
             .skip(skip)
             .limit(limitNumber)
             .sort({ createdAt: -1 })
-            .toArray(),
-        collection.countDocuments(query),
+            .lean(),
+        Workshop.countDocuments(query),
     ]);
 
     return {
@@ -155,42 +112,63 @@ export const listWorkshops = async ({ page = 1, limit = 10, search = "" } = {}) 
 };
 
 export const findWorkshopById = async (id) => {
-    const db = getDB();
-    return await db
-        .collection(WORKSHOPS_COLLECTION)
-        .findOne({ _id: toObjectId(id) });
+    try {
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            throw new ValidationError("Invalid workshop id");
+        }
+        const workshop = await Workshop.findById(id).lean();
+        return workshop;
+    } catch (error) {
+        if (error instanceof ValidationError) throw error;
+        throw new ValidationError("Invalid workshop id");
+    }
 };
 
 export const updateWorkshop = async (id, data) => {
-    const db = getDB();
-    const updates = prepareWorkshopDoc(data, { partial: true });
+    try {
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            throw new ValidationError("Invalid workshop id");
+        }
 
-    if (!Object.keys(updates).length) {
-        throw new ValidationError("At least one field must be provided to update");
+        if (!data || !Object.keys(data).length) {
+            throw new ValidationError("At least one field must be provided to update");
+        }
+
+        const workshop = await Workshop.findByIdAndUpdate(
+            id,
+            { $set: data },
+            { new: true, runValidators: true }
+        ).lean();
+
+        if (!workshop) {
+            throw new ValidationError("Workshop not found");
+        }
+
+        return workshop;
+    } catch (error) {
+        handleValidationError(error);
     }
-
-    updates.updatedAt = new Date();
-
-    const result = await db.collection(WORKSHOPS_COLLECTION).findOneAndUpdate(
-        { _id: toObjectId(id) },
-        { $set: updates },
-        { returnDocument: "after" }
-    );
-
-    return result;
 };
 
 export const deleteWorkshop = async (id) => {
-    const db = getDB();
-    const objectId = toObjectId(id);
-    const result = await db.collection(WORKSHOPS_COLLECTION).findOneAndDelete({ _id: objectId });
-    if (!result) {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            throw new ValidationError("Invalid workshop id");
+        }
+
+        const workshop = await Workshop.findByIdAndDelete(id).lean();
+        if (!workshop) {
+            throw new ValidationError("Workshop not found");
+        }
+        return workshop;
+    } catch (error) {
+        if (error instanceof ValidationError) throw error;
         throw new ValidationError("Workshop not found");
     }
-    return result;
 };
 
 export const countWorkshops = async () => {
-    const db = getDB();
-    return await db.collection(WORKSHOPS_COLLECTION).countDocuments({});
+    return await Workshop.countDocuments({});
 };
+
+export default Workshop;
